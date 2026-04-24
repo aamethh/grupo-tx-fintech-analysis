@@ -1,6 +1,6 @@
 -- ============================================================
--- Grupo TX  |  Financial Analysis Database
--- Schema: financials, metrics, time_series
+-- Grupo TX  |  Financial Analysis Database  (v2 — real data)
+-- Reflects actual structure from grupo_tx_financials.xlsx
 -- ============================================================
 
 CREATE DATABASE GrupoTX;
@@ -9,107 +9,127 @@ USE GrupoTX;
 GO
 
 -- ------------------------------------------------------------
--- 1. COMPANIES
---    Master table — one row per entity being tracked
--- ------------------------------------------------------------
-CREATE TABLE companies (
-    company_id      INT IDENTITY(1,1) PRIMARY KEY,
-    company_code    VARCHAR(10)  NOT NULL UNIQUE,   -- e.g. 'GTX'
-    company_name    VARCHAR(100) NOT NULL,
-    sector          VARCHAR(50),
-    country         VARCHAR(50)  DEFAULT 'Panama',
-    currency        CHAR(3)      DEFAULT 'USD',
-    created_at      DATETIME     DEFAULT GETDATE()
-);
-
--- ------------------------------------------------------------
--- 2. FINANCIALS
---    Annual balance sheet + P&L figures (in thousands USD)
+-- 1. FINANCIALS  (P&L + Balance Sheet)
+--    Source: 2.xlsx → "Tabla Maestra" and "base de datos"
 -- ------------------------------------------------------------
 CREATE TABLE financials (
     id                  INT IDENTITY(1,1) PRIMARY KEY,
-    company_id          INT          NOT NULL REFERENCES companies(company_id),
-    fiscal_year         SMALLINT     NOT NULL,             -- e.g. 2023
-    period_type         CHAR(1)      DEFAULT 'A',          -- A=Annual, Q=Quarterly
+    fiscal_year         VARCHAR(10)  NOT NULL,    -- '2023', '2024', '2025 Q2'
+    period_type         VARCHAR(10)  DEFAULT 'Annual',
+
+    -- Income Statement
+    ingresos_totales    DECIMAL(18,2),   -- Total Revenue
+    costo_ventas        DECIMAL(18,2),   -- Cost of Sales (COGS)
+    utilidad_bruta      DECIMAL(18,2),   -- Gross Profit
+    ebitda              DECIMAL(18,2),
+    ebit                DECIMAL(18,2),
+    utilidad_neta       DECIMAL(18,2),   -- Net Income
+    gastos_financieros  DECIMAL(18,2),   -- Interest Expense
+    nopat               DECIMAL(18,2),   -- Net Operating Profit After Tax
 
     -- Balance Sheet
-    total_assets        DECIMAL(18,2),
-    total_liabilities   DECIMAL(18,2),
-    total_equity        DECIMAL(18,2),
-    gross_loans         DECIMAL(18,2),
-    investments         DECIMAL(18,2),
-    total_deposits      DECIMAL(18,2),
-    aum                 DECIMAL(18,2),
+    activos_totales     DECIMAL(18,2),   -- Total Assets
+    activo_corriente    DECIMAL(18,2),   -- Current Assets
+    pasivo_corriente    DECIMAL(18,2),   -- Current Liabilities
+    pasivo_no_corriente DECIMAL(18,2),   -- Non-Current Liabilities
+    total_pasivos       DECIMAL(18,2),   -- Total Liabilities
+    patrimonio          DECIMAL(18,2),   -- Equity
+    deuda_total         DECIMAL(18,2),   -- Total Debt
+    dias_inventario     DECIMAL(8,2),
+    dias_cxc            DECIMAL(8,2),    -- Days Sales Outstanding
+    dias_cxp            DECIMAL(8,2),    -- Days Payable Outstanding
 
-    -- P&L
-    net_revenue         DECIMAL(18,2),
-    operating_expenses  DECIMAL(18,2),
-    net_income          DECIMAL(18,2),
-    interest_income     DECIMAL(18,2),
-    fee_income          DECIMAL(18,2),
+    created_at          DATETIME DEFAULT GETDATE(),
 
-    -- Risk
-    npl_ratio           DECIMAL(6,4),    -- e.g. 0.0215 = 2.15%
-    npl_coverage        DECIMAL(6,4),    -- e.g. 1.2430 = 124.3%
-    capital_ratio       DECIMAL(6,4),
-
-    created_at          DATETIME         DEFAULT GETDATE(),
-
-    CONSTRAINT uq_financials UNIQUE (company_id, fiscal_year, period_type)
+    CONSTRAINT uq_financials UNIQUE (fiscal_year)
 );
 
 -- ------------------------------------------------------------
--- 3. METRICS
---    Calculated ratios — derived from financials, stored here
---    for fast Power BI querying without recalculating each time
+-- 2. MARGINS
+--    Source: margenes.xlsx → "Hoja1"
+-- ------------------------------------------------------------
+CREATE TABLE margins (
+    id                  INT IDENTITY(1,1) PRIMARY KEY,
+    fiscal_year         VARCHAR(10)  NOT NULL,
+
+    margen_bruto        DECIMAL(8,4),    -- Gross Margin %
+    margen_ebitda       DECIMAL(8,4),    -- EBITDA Margin %
+    margen_ebit         DECIMAL(8,4),    -- EBIT / Operating Margin %
+    margen_neto         DECIMAL(8,4),    -- Net Margin %
+
+    created_at          DATETIME DEFAULT GETDATE(),
+
+    CONSTRAINT uq_margins UNIQUE (fiscal_year)
+);
+
+-- ------------------------------------------------------------
+-- 3. RATIOS
+--    Source: 2.xlsx → "Ratios"
+-- ------------------------------------------------------------
+CREATE TABLE ratios (
+    id                      INT IDENTITY(1,1) PRIMARY KEY,
+    fiscal_year             VARCHAR(10)  NOT NULL,
+
+    -- Liquidity
+    razon_circulante        DECIMAL(8,4),   -- Current Ratio
+    prueba_acida            DECIMAL(8,4),   -- Quick Ratio
+    capital_trabajo         DECIMAL(18,2),  -- Working Capital
+
+    -- Leverage
+    deuda_equity            DECIMAL(8,4),   -- D/E Ratio
+    deuda_activos           DECIMAL(8,4),   -- Debt / Assets
+    pct_deuda               DECIMAL(8,4),   -- Debt % of capital structure
+    pct_patrimonio          DECIMAL(8,4),   -- Equity % of capital structure
+
+    -- Coverage
+    cobertura_intereses     DECIMAL(8,4),   -- Interest Coverage (EBIT / Int. Exp.)
+
+    -- Cost of Capital
+    wacc                    DECIMAL(8,4),
+
+    created_at              DATETIME DEFAULT GETDATE(),
+
+    CONSTRAINT uq_ratios UNIQUE (fiscal_year)
+);
+
+-- ------------------------------------------------------------
+-- 4. METRICS  (derived — calculated by Python, stored here)
 -- ------------------------------------------------------------
 CREATE TABLE metrics (
     id                  INT IDENTITY(1,1) PRIMARY KEY,
-    company_id          INT          NOT NULL REFERENCES companies(company_id),
-    fiscal_year         SMALLINT     NOT NULL,
+    fiscal_year         VARCHAR(10) NOT NULL,
+
+    -- Growth (YoY)
+    revenue_growth      DECIMAL(8,4),
+    ebitda_growth       DECIMAL(8,4),
+    net_income_growth   DECIMAL(8,4),
+    asset_growth        DECIMAL(8,4),
 
     -- Profitability
-    roe                 DECIMAL(8,4),    -- Return on Equity
-    roa                 DECIMAL(8,4),    -- Return on Assets
-    nim                 DECIMAL(8,4),    -- Net Interest Margin
-    cost_to_income      DECIMAL(8,4),
+    roe                 DECIMAL(8,4),    -- Net Income / Equity
+    roa                 DECIMAL(8,4),    -- Net Income / Total Assets
+    roce                DECIMAL(8,4),    -- EBIT / Capital Employed
 
-    -- Efficiency & Structure
-    loan_to_deposit     DECIMAL(8,4),
-    capital_multiplier  DECIMAL(8,4),
+    -- Efficiency
+    ccc                 DECIMAL(8,2),    -- Cash Conversion Cycle
 
-    -- AUM
-    aum_to_assets       DECIMAL(8,4),
-    aum_to_loans        DECIMAL(8,4),
-    aum_growth_yoy      DECIMAL(8,4),
+    calculated_at       DATETIME DEFAULT GETDATE(),
 
-    -- Growth
-    asset_growth_yoy    DECIMAL(8,4),
-    loan_growth_yoy     DECIMAL(8,4),
-    income_growth_yoy   DECIMAL(8,4),
-
-    calculated_at       DATETIME         DEFAULT GETDATE(),
-
-    CONSTRAINT uq_metrics UNIQUE (company_id, fiscal_year)
+    CONSTRAINT uq_metrics UNIQUE (fiscal_year)
 );
 
 -- ------------------------------------------------------------
--- 4. TIME_SERIES
---    Monthly or quarterly snapshots for trend analysis
+-- 5. TIME_SERIES  (for trend / dashboard use)
 -- ------------------------------------------------------------
 CREATE TABLE time_series (
     id              INT IDENTITY(1,1) PRIMARY KEY,
-    company_id      INT         NOT NULL REFERENCES companies(company_id),
-    period_date     DATE        NOT NULL,              -- first day of period
-    period_type     VARCHAR(10) DEFAULT 'monthly',     -- monthly / quarterly
-    metric_name     VARCHAR(50) NOT NULL,              -- e.g. 'aum', 'net_income'
-    metric_value    DECIMAL(18,2),
+    fiscal_year     VARCHAR(10)  NOT NULL,
+    metric_name     VARCHAR(50)  NOT NULL,
+    metric_value    DECIMAL(18,4),
 
-    CONSTRAINT uq_timeseries UNIQUE (company_id, period_date, metric_name)
+    CONSTRAINT uq_ts UNIQUE (fiscal_year, metric_name)
 );
 
--- Indexes for query performance
-CREATE INDEX ix_financials_year    ON financials  (company_id, fiscal_year);
-CREATE INDEX ix_metrics_year       ON metrics     (company_id, fiscal_year);
-CREATE INDEX ix_timeseries_date    ON time_series (company_id, period_date);
+-- Indexes
+CREATE INDEX ix_ts_metric ON time_series (metric_name, fiscal_year);
 GO

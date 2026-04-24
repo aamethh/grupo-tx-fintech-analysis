@@ -1,82 +1,171 @@
 """
 ingest.py
 ---------
-Loads raw financial data from /data/raw_financials.csv
-and writes it to SQL Server via SQLAlchemy.
+Reads the real Excel files and loads data into SQL Server.
 
-Run once to populate the database.
+Sources:
+  data/grupo_tx_financials.xlsx  →  financials + ratios tables
+  data/grupo_tx_margenes.xlsx    →  margins table
 """
 import pandas as pd
+import warnings
 from sqlalchemy import text
 from db_connect import get_engine
 
-RAW_FILE = "data/raw_financials.csv"
+warnings.filterwarnings("ignore", category=UserWarning)
+
+FINANCIALS_FILE = r"data\grupo_tx_financials.xlsx"
+MARGINS_FILE    = r"data\grupo_tx_margenes.xlsx"
 
 
-def load_raw(filepath: str) -> pd.DataFrame:
-    df = pd.read_csv(filepath)
-    df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
-    df = df.dropna(subset=["company_id", "fiscal_year"])
-    df["fiscal_year"] = df["fiscal_year"].astype(int)
+# ── Loaders ───────────────────────────────────────────────────────────────────
+
+def load_financials() -> pd.DataFrame:
+    """Reads 'Tabla Maestra' (wide) and 'Ratios' sheet, merges into one row per year."""
+
+    # P&L + Balance (from Tabla Maestra)
+    pnl = pd.read_excel(FINANCIALS_FILE, sheet_name="Tabla Maestra ", header=1)
+    pnl.columns = pnl.columns.str.strip()
+    pnl = pnl.dropna(subset=["Año"])
+    pnl["Año"] = pnl["Año"].astype(str).str.strip()
+
+    col_map_pnl = {
+        "Año":                "fiscal_year",
+        "Ingresos totales":   "ingresos_totales",
+        "Costo de ventas":    "costo_ventas",
+        "Utilidad bruta":     "utilidad_bruta",
+        "EBITDA":             "ebitda",
+        "EBIT":               "ebit",
+        "Utilidad Neta":      "utilidad_neta",
+        "Patrimonio":         "patrimonio",
+        "Activos Totales":    "activos_totales",
+        "Deuda Total":        "deuda_total",
+        "Gastos Financieros": "gastos_financieros",
+        "NOPAT":              "nopat",
+        "Días Inventario":    "dias_inventario",
+        "Días CxC":           "dias_cxc",
+        "DíasCxP":            "dias_cxp",
+    }
+    pnl = pnl.rename(columns=col_map_pnl)
+    pnl = pnl[[c for c in col_map_pnl.values() if c in pnl.columns]]
+
+    # Balance sheet detail (from Ratios sheet)
+    bal = pd.read_excel(FINANCIALS_FILE, sheet_name="Ratios", header=1)
+    bal.columns = bal.columns.str.strip()
+    bal = bal.dropna(subset=["Año"])
+    bal["Año"] = bal["Año"].astype(str).str.strip()
+
+    col_map_bal = {
+        "Año":                   "fiscal_year",
+        "Activo Corriente":      "activo_corriente",
+        "Pasivo Corriente":      "pasivo_corriente",
+        "Pasivo No Corriente":   "pasivo_no_corriente",
+        "Total Activos":         "activos_totales_r",  # keep separate to compare
+        "Total Pasivos":         "total_pasivos",
+    }
+    bal = bal.rename(columns=col_map_bal)
+    bal = bal[[c for c in col_map_bal.values() if c in bal.columns]]
+
+    merged = pnl.merge(bal, on="fiscal_year", how="left")
+    return merged
+
+
+def load_margins() -> pd.DataFrame:
+    df = pd.read_excel(MARGINS_FILE, sheet_name="Hoja1", header=1)
+    df.columns = df.columns.str.strip()
+    df = df.dropna(subset=["Año"])
+    df["Año"] = df["Año"].astype(str).str.strip()
+
+    col_map = {
+        "Año":                   "fiscal_year",
+        "Ingresos totales(USD)": "ingresos_totales",
+        "Margen bruto %":        "margen_bruto",
+        "Margen EBITDA %":       "margen_ebitda",
+    }
+    df = df.rename(columns=col_map)
+    df = df[[c for c in col_map.values() if c in df.columns]]
+
+    # Derive margins not in the file
+    raw = pd.read_excel(FINANCIALS_FILE, sheet_name="Analisis Verical-Horizontal ", header=1)
+    # margin data is in rows 9-12 of that sheet — extract directly from 2.xlsx Vertical sheet
     return df
 
 
-def get_or_create_company(conn, company_code: str, company_name: str) -> int:
-    row = conn.execute(
-        text("SELECT company_id FROM companies WHERE company_code = :code"),
-        {"code": company_code}
-    ).fetchone()
-    if row:
-        return row[0]
-    result = conn.execute(
-        text("INSERT INTO companies (company_code, company_name) "
-             "OUTPUT INSERTED.company_id VALUES (:code, :name)"),
-        {"code": company_code, "name": company_name}
-    )
-    return result.fetchone()[0]
+def load_ratios() -> pd.DataFrame:
+    df = pd.read_excel(FINANCIALS_FILE, sheet_name="Ratios", header=1)
+    df.columns = df.columns.str.strip()
+    df = df.dropna(subset=["Año"])
+    df["Año"] = df["Año"].astype(str).str.strip()
+
+    col_map = {
+        "Año":                     "fiscal_year",
+        "Razon circulante":        "razon_circulante",
+        "prueba acida":            "prueba_acida",
+        "D/E":                     "deuda_equity",
+        "Deuda/Activos":           "deuda_activos",
+        "Capital de Trabajo":      "capital_trabajo",
+        "Cobertura de intereses":  "cobertura_intereses",
+        "WACC":                    "wacc",
+        "% Deuda":                 "pct_deuda",
+        "% Patrimonio":            "pct_patrimonio",
+    }
+    df = df.rename(columns=col_map)
+    return df[[c for c in col_map.values() if c in df.columns]]
 
 
-def upsert_financials(df: pd.DataFrame):
-    engine = get_engine()
-    numeric_cols = [
-        "total_assets", "total_liabilities", "total_equity",
-        "gross_loans", "investments", "total_deposits", "aum",
-        "net_revenue", "operating_expenses", "net_income",
-        "interest_income", "fee_income",
-        "npl_ratio", "npl_coverage", "capital_ratio"
-    ]
-    with engine.begin() as conn:
-        for _, row in df.iterrows():
-            company_id = get_or_create_company(
-                conn, row["company_code"], row.get("company_name", row["company_code"])
-            )
-            values = {col: row.get(col) for col in numeric_cols}
-            values.update({"company_id": company_id, "fiscal_year": int(row["fiscal_year"])})
+# ── Writers ───────────────────────────────────────────────────────────────────
 
-            existing = conn.execute(
-                text("SELECT id FROM financials WHERE company_id=:company_id AND fiscal_year=:fiscal_year"),
-                {"company_id": company_id, "fiscal_year": values["fiscal_year"]}
-            ).fetchone()
+def upsert(conn, table: str, df: pd.DataFrame, key: str = "fiscal_year"):
+    for _, row in df.iterrows():
+        data = {k: (None if pd.isna(v) else v) for k, v in row.items()}
+        exists = conn.execute(
+            text(f"SELECT id FROM {table} WHERE {key}=:{key}"),
+            {key: data[key]}
+        ).fetchone()
 
-            if existing:
-                set_clause = ", ".join([f"{c}=:{c}" for c in numeric_cols])
-                conn.execute(
-                    text(f"UPDATE financials SET {set_clause} "
-                         f"WHERE company_id=:company_id AND fiscal_year=:fiscal_year"),
-                    values
-                )
-                print(f"  Updated: {row['company_code']} {row['fiscal_year']}")
-            else:
-                cols = ", ".join(["company_id", "fiscal_year"] + numeric_cols)
-                params = ", ".join([":company_id", ":fiscal_year"] + [f":{c}" for c in numeric_cols])
-                conn.execute(text(f"INSERT INTO financials ({cols}) VALUES ({params})"), values)
-                print(f"  Inserted: {row['company_code']} {row['fiscal_year']}")
+        cols   = ", ".join(data.keys())
+        params = ", ".join([f":{k}" for k in data.keys()])
+        set_cl = ", ".join([f"{k}=:{k}" for k in data.keys() if k != key])
 
+        if exists:
+            conn.execute(text(f"UPDATE {table} SET {set_cl} WHERE {key}=:{key}"), data)
+            print(f"  Updated  [{table}] {key}={data[key]}")
+        else:
+            conn.execute(text(f"INSERT INTO {table} ({cols}) VALUES ({params})"), data)
+            print(f"  Inserted [{table}] {key}={data[key]}")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("Loading raw data...")
-    df = load_raw(RAW_FILE)
-    print(f"  {len(df)} rows loaded from {RAW_FILE}")
-    print("Writing to SQL Server...")
-    upsert_financials(df)
-    print("Done.")
+    print("Loading Excel files...")
+    df_fin = load_financials()
+    df_mar = load_margins()
+    df_rat = load_ratios()
+
+    print(f"  Financials:  {len(df_fin)} rows | cols: {list(df_fin.columns)}")
+    print(f"  Margins:     {len(df_mar)} rows | cols: {list(df_mar.columns)}")
+    print(f"  Ratios:      {len(df_rat)} rows | cols: {list(df_rat.columns)}")
+
+    print("\nWriting to SQL Server...")
+    engine = get_engine()
+    with engine.begin() as conn:
+        upsert(conn, "financials", df_fin[
+            [c for c in df_fin.columns if c in [
+                "fiscal_year", "ingresos_totales", "costo_ventas", "utilidad_bruta",
+                "ebitda", "ebit", "utilidad_neta", "patrimonio", "activos_totales",
+                "deuda_total", "gastos_financieros", "nopat",
+                "dias_inventario", "dias_cxc", "dias_cxp",
+                "activo_corriente", "pasivo_corriente", "pasivo_no_corriente", "total_pasivos"
+            ]]
+        ])
+        upsert(conn, "margins", df_mar)
+        upsert(conn, "ratios", df_rat[[
+            c for c in df_rat.columns if c in [
+                "fiscal_year", "razon_circulante", "prueba_acida", "capital_trabajo",
+                "deuda_equity", "deuda_activos", "cobertura_intereses", "wacc",
+                "pct_deuda", "pct_patrimonio"
+            ]
+        ]])
+
+    print("\nIngestion complete.")

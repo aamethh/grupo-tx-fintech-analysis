@@ -5,95 +5,103 @@ USE GrupoTX;
 GO
 
 -- ------------------------------------------------------------
--- Q1. Full financials snapshot — latest year per company
+-- Q1. Full P&L Summary
 -- ------------------------------------------------------------
 SELECT
-    c.company_code,
-    c.company_name,
-    f.fiscal_year,
-    f.total_assets       / 1000.0  AS assets_M,
-    f.gross_loans        / 1000.0  AS loans_M,
-    f.total_deposits     / 1000.0  AS deposits_M,
-    f.aum                / 1000.0  AS aum_M,
-    f.net_income         / 1000.0  AS net_income_M,
-    f.capital_ratio      * 100     AS capital_ratio_pct,
-    f.npl_coverage       * 100     AS npl_coverage_pct
-FROM financials f
-JOIN companies  c ON c.company_id = f.company_id
-WHERE f.fiscal_year = (
-    SELECT MAX(f2.fiscal_year)
-    FROM financials f2
-    WHERE f2.company_id = f.company_id
-)
-ORDER BY f.total_assets DESC;
+    fiscal_year                                         AS Year,
+    ingresos_totales   / 1e6                            AS Revenue_M,
+    costo_ventas       / 1e6                            AS COGS_M,
+    utilidad_bruta     / 1e6                            AS GrossProfit_M,
+    ebitda             / 1e6                            AS EBITDA_M,
+    ebit               / 1e6                            AS EBIT_M,
+    utilidad_neta      / 1e6                            AS NetIncome_M,
+    nopat              / 1e6                            AS NOPAT_M
+FROM financials
+ORDER BY fiscal_year;
 
 -- ------------------------------------------------------------
--- Q2. Calculated ratios inline (no metrics table needed)
+-- Q2. Margin evolution — joins financials + margins
 -- ------------------------------------------------------------
 SELECT
-    c.company_code,
-    f.fiscal_year,
-    ROUND(f.net_income  / NULLIF(f.total_equity, 0) * 100, 2)  AS roe_pct,
-    ROUND(f.net_income  / NULLIF(f.total_assets, 0) * 100, 2)  AS roa_pct,
-    ROUND(f.gross_loans / NULLIF(f.total_deposits,0) * 100, 2) AS loan_to_deposit_pct,
-    ROUND(f.aum         / NULLIF(f.total_assets, 0) * 100, 2)  AS aum_to_assets_pct,
-    ROUND(f.operating_expenses / NULLIF(f.net_revenue, 0) * 100, 2) AS cost_to_income_pct,
-    ROUND(f.total_assets / NULLIF(f.total_equity, 0), 2)        AS capital_multiplier
+    f.fiscal_year                                       AS Year,
+    f.ingresos_totales / 1e6                            AS Revenue_M,
+    ROUND(m.margen_bruto   * 100, 2)                    AS GrossMargin_Pct,
+    ROUND(m.margen_ebitda  * 100, 2)                    AS EBITDAMargin_Pct,
+    ROUND(m.margen_ebit    * 100, 2)                    AS EBITMargin_Pct,
+    ROUND(m.margen_neto    * 100, 2)                    AS NetMargin_Pct
 FROM financials f
-JOIN companies  c ON c.company_id = f.company_id
-ORDER BY c.company_code, f.fiscal_year;
+JOIN margins    m ON m.fiscal_year = f.fiscal_year
+ORDER BY f.fiscal_year;
 
 -- ------------------------------------------------------------
--- Q3. Year-over-year growth per company
+-- Q3. YoY Revenue & Profit Growth
 -- ------------------------------------------------------------
 SELECT
-    c.company_code,
-    f.fiscal_year,
+    fiscal_year,
+    ingresos_totales / 1e6                              AS Revenue_M,
     ROUND(
-        (f.total_assets - LAG(f.total_assets) OVER (PARTITION BY f.company_id ORDER BY f.fiscal_year))
-        / NULLIF(LAG(f.total_assets) OVER (PARTITION BY f.company_id ORDER BY f.fiscal_year), 0) * 100
-    , 2) AS asset_growth_yoy_pct,
+        (ingresos_totales - LAG(ingresos_totales) OVER (ORDER BY fiscal_year))
+        / NULLIF(LAG(ingresos_totales) OVER (ORDER BY fiscal_year), 0) * 100
+    , 2)                                                AS Revenue_Growth_Pct,
     ROUND(
-        (f.aum - LAG(f.aum) OVER (PARTITION BY f.company_id ORDER BY f.fiscal_year))
-        / NULLIF(LAG(f.aum) OVER (PARTITION BY f.company_id ORDER BY f.fiscal_year), 0) * 100
-    , 2) AS aum_growth_yoy_pct,
+        (ebitda - LAG(ebitda) OVER (ORDER BY fiscal_year))
+        / NULLIF(LAG(ebitda) OVER (ORDER BY fiscal_year), 0) * 100
+    , 2)                                                AS EBITDA_Growth_Pct,
     ROUND(
-        (f.net_income - LAG(f.net_income) OVER (PARTITION BY f.company_id ORDER BY f.fiscal_year))
-        / NULLIF(LAG(f.net_income) OVER (PARTITION BY f.company_id ORDER BY f.fiscal_year), 0) * 100
-    , 2) AS income_growth_yoy_pct
-FROM financials f
-JOIN companies  c ON c.company_id = f.company_id
-ORDER BY c.company_code, f.fiscal_year;
+        (utilidad_neta - LAG(utilidad_neta) OVER (ORDER BY fiscal_year))
+        / NULLIF(LAG(utilidad_neta) OVER (ORDER BY fiscal_year), 0) * 100
+    , 2)                                                AS NetIncome_Growth_Pct
+FROM financials
+ORDER BY fiscal_year;
 
 -- ------------------------------------------------------------
--- Q4. AUM monthly trend — for Power BI line chart
+-- Q4. Leverage & Liquidity overview
 -- ------------------------------------------------------------
 SELECT
-    c.company_code,
-    ts.period_date,
-    FORMAT(ts.period_date, 'MMM yyyy')  AS period_label,
-    ts.metric_value                     AS aum_value,
-    ROUND(
-        (ts.metric_value - LAG(ts.metric_value) OVER (PARTITION BY ts.company_id ORDER BY ts.period_date))
-        / NULLIF(LAG(ts.metric_value) OVER (PARTITION BY ts.company_id ORDER BY ts.period_date), 0) * 100
-    , 2) AS mom_growth_pct
-FROM time_series ts
-JOIN companies   c ON c.company_id = ts.company_id
-WHERE ts.metric_name = 'aum'
-ORDER BY ts.company_id, ts.period_date;
+    r.fiscal_year                                       AS Year,
+    ROUND(r.razon_circulante, 2)                        AS CurrentRatio,
+    ROUND(r.prueba_acida,     2)                        AS QuickRatio,
+    r.capital_trabajo / 1e6                             AS WorkingCapital_M,
+    ROUND(r.deuda_equity,     2)                        AS DE_Ratio,
+    ROUND(r.deuda_activos * 100, 1)                     AS Debt_Assets_Pct,
+    ROUND(r.cobertura_intereses, 2)                     AS InterestCoverage,
+    ROUND(r.wacc * 100, 2)                              AS WACC_Pct
+FROM ratios r
+ORDER BY r.fiscal_year;
 
 -- ------------------------------------------------------------
--- Q5. Peer comparison — all companies, all years
+-- Q5. Profitability ratios — inline calculation
 -- ------------------------------------------------------------
 SELECT
-    c.company_code,
-    f.fiscal_year,
-    ROUND(f.net_income / NULLIF(f.total_equity, 0) * 100, 2)  AS roe,
-    ROUND(f.net_income / NULLIF(f.total_assets, 0) * 100, 2)  AS roa,
-    ROUND(f.aum        / NULLIF(f.total_assets, 0) * 100, 2)  AS aum_penetration,
-    f.capital_ratio * 100                                       AS capital_ratio,
-    f.npl_coverage  * 100                                       AS npl_coverage
+    f.fiscal_year                                       AS Year,
+    ROUND(f.utilidad_neta / NULLIF(f.patrimonio,    0) * 100, 2) AS ROE_Pct,
+    ROUND(f.utilidad_neta / NULLIF(f.activos_totales,0) * 100, 2) AS ROA_Pct,
+    ROUND(f.ebit / NULLIF(f.activos_totales - f.pasivo_corriente, 0) * 100, 2) AS ROCE_Pct,
+    ROUND((f.dias_cxc + f.dias_inventario - f.dias_cxp), 1)      AS CCC_Days
 FROM financials f
-JOIN companies  c ON c.company_id = f.company_id
-ORDER BY f.fiscal_year, roe DESC;
+ORDER BY f.fiscal_year;
+
+-- ------------------------------------------------------------
+-- Q6. Power BI flat export — all metrics in one row per year
+-- ------------------------------------------------------------
+SELECT
+    f.fiscal_year                                   AS Year,
+    f.ingresos_totales  / 1e6                       AS Revenue_M,
+    f.ebitda            / 1e6                       AS EBITDA_M,
+    f.utilidad_neta     / 1e6                       AS NetIncome_M,
+    f.activos_totales   / 1e6                       AS Assets_M,
+    f.patrimonio        / 1e6                       AS Equity_M,
+    f.deuda_total       / 1e6                       AS Debt_M,
+    ROUND(m.margen_bruto   * 100, 2)                AS GrossMargin_Pct,
+    ROUND(m.margen_ebitda  * 100, 2)                AS EBITDAMargin_Pct,
+    ROUND(m.margen_neto    * 100, 2)                AS NetMargin_Pct,
+    ROUND(r.razon_circulante, 2)                    AS CurrentRatio,
+    ROUND(r.deuda_equity,     2)                    AS DE_Ratio,
+    ROUND(r.wacc * 100, 2)                          AS WACC_Pct,
+    ROUND(f.utilidad_neta / NULLIF(f.patrimonio,0) * 100, 2)      AS ROE_Pct,
+    ROUND(f.utilidad_neta / NULLIF(f.activos_totales,0) * 100, 2) AS ROA_Pct
+FROM financials f
+JOIN margins    m ON m.fiscal_year = f.fiscal_year
+JOIN ratios     r ON r.fiscal_year = f.fiscal_year
+ORDER BY f.fiscal_year;
 GO
